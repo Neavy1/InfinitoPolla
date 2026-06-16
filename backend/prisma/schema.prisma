@@ -1,0 +1,239 @@
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+enum Role {
+  USER
+  ADMIN
+}
+
+enum Phase {
+  GROUPS
+  R32
+  R16
+  QF
+  SF
+  THIRD_PLACE
+  FINAL
+}
+
+enum MatchStatus {
+  SCHEDULED
+  LIVE
+  FINISHED
+}
+
+model User {
+  id           String   @id @default(cuid())
+  username     String   @unique
+  email        String?  @unique
+  passwordHash String
+  role         Role     @default(USER)
+  createdAt    DateTime @default(now())
+  updatedAt    DateTime @updatedAt
+
+  groupPredictions   GroupPrediction[]
+  thirdPredictions   ThirdPrediction[]
+  bracketPredictions BracketPrediction[]
+  finalPrediction    FinalPrediction?
+  score              Score?
+  audits             PredictionAudit[]
+}
+
+model Group {
+  id   String @id @default(cuid())
+  name String @unique
+
+  teams            Team[]
+  groupPredictions GroupPrediction[]
+  thirdPredictions ThirdPrediction[]
+  standings        GroupStanding[]
+}
+
+model Team {
+  id       String  @id @default(cuid())
+  name     String
+  code     String  @unique
+  flagUrl  String?
+  groupId  String
+  group    Group   @relation(fields: [groupId], references: [id])
+
+  homeMatches Match[] @relation("HomeTeam")
+  awayMatches Match[] @relation("AwayTeam")
+
+  groupPredictionsFirst  GroupPrediction[] @relation("FirstPlace")
+  groupPredictionsSecond GroupPrediction[] @relation("SecondPlace")
+  thirdPredictions       ThirdPrediction[]
+  bracketPredictions     BracketPrediction[]
+  finalChampion          FinalPrediction[] @relation("Champion")
+  finalRunnerUp          FinalPrediction[] @relation("RunnerUp")
+  finalThird             FinalPrediction[] @relation("Third")
+  finalFourth            FinalPrediction[] @relation("Fourth")
+  groupStandings         GroupStanding[]
+  thirdsTable            ThirdsTable[]
+}
+
+model Match {
+  id         String      @id @default(cuid())
+  phase      Phase
+  kickoffAt  DateTime
+  homeTeamId String?
+  homeTeam   Team?       @relation("HomeTeam", fields: [homeTeamId], references: [id])
+  awayTeamId String?
+  awayTeam   Team?       @relation("AwayTeam", fields: [awayTeamId], references: [id])
+  homeScore  Int?
+  awayScore  Int?
+  bracketSlot String?
+  status     MatchStatus @default(SCHEDULED)
+  groupName  String?
+  createdAt  DateTime    @default(now())
+  updatedAt  DateTime    @updatedAt
+
+  @@index([phase, kickoffAt])
+  @@index([bracketSlot])
+}
+
+model GroupPrediction {
+  id            String @id @default(cuid())
+  userId        String
+  user          User   @relation(fields: [userId], references: [id], onDelete: Cascade)
+  groupId       String
+  group         Group  @relation(fields: [groupId], references: [id])
+  firstTeamId   String
+  firstTeam     Team   @relation("FirstPlace", fields: [firstTeamId], references: [id])
+  secondTeamId  String
+  secondTeam    Team   @relation("SecondPlace", fields: [secondTeamId], references: [id])
+
+  @@unique([userId, groupId])
+}
+
+model ThirdPrediction {
+  id      String @id @default(cuid())
+  userId  String
+  user    User   @relation(fields: [userId], references: [id], onDelete: Cascade)
+  groupId String
+  group   Group  @relation(fields: [groupId], references: [id])
+  teamId  String
+  team    Team   @relation(fields: [teamId], references: [id])
+
+  @@unique([userId, groupId])
+}
+
+model BracketPrediction {
+  id      String @id @default(cuid())
+  userId  String
+  user    User   @relation(fields: [userId], references: [id], onDelete: Cascade)
+  phase   Phase
+  slot    String
+  teamId  String
+  team    Team   @relation(fields: [teamId], references: [id])
+
+  @@unique([userId, phase, slot])
+}
+
+model FinalPrediction {
+  id          String @id @default(cuid())
+  userId      String @unique
+  user        User   @relation(fields: [userId], references: [id], onDelete: Cascade)
+  championId  String
+  champion    Team   @relation("Champion", fields: [championId], references: [id])
+  runnerUpId  String
+  runnerUp    Team   @relation("RunnerUp", fields: [runnerUpId], references: [id])
+  thirdId     String
+  third       Team   @relation("Third", fields: [thirdId], references: [id])
+  fourthId    String
+  fourth      Team   @relation("Fourth", fields: [fourthId], references: [id])
+}
+
+model GroupStanding {
+  id            String @id @default(cuid())
+  groupId       String
+  group         Group  @relation(fields: [groupId], references: [id])
+  teamId        String
+  team          Team   @relation(fields: [teamId], references: [id])
+  position      Int
+  points        Int    @default(0)
+  goalsFor      Int    @default(0)
+  goalsAgainst  Int    @default(0)
+  goalDiff      Int    @default(0)
+  yellowCards   Int    @default(0)
+  redCards      Int    @default(0)
+  fairPlayScore Int    @default(0)
+
+  @@unique([groupId, teamId])
+  @@unique([groupId, position])
+}
+
+model ThirdsTable {
+  id            String  @id @default(cuid())
+  teamId        String  @unique
+  team          Team    @relation(fields: [teamId], references: [id])
+  groupName     String
+  rank          Int?
+  qualified     Boolean @default(false)
+  points        Int     @default(0)
+  goalsFor      Int     @default(0)
+  goalsAgainst  Int     @default(0)
+  goalDiff      Int     @default(0)
+  yellowCards   Int     @default(0)
+  redCards      Int     @default(0)
+  fairPlayScore Int     @default(0)
+}
+
+model BracketTemplate {
+  id          String @id @default(cuid())
+  phase       Phase
+  slot        String
+  homeSource  String
+  awaySource  String
+  description String?
+
+  @@unique([phase, slot])
+}
+
+model ScoringConfig {
+  id        String   @id @default(cuid())
+  key       String   @unique
+  label     String
+  points    Int
+  updatedAt DateTime @updatedAt
+}
+
+model Score {
+  id              String   @id @default(cuid())
+  userId          String   @unique
+  user            User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  totalPoints     Int      @default(0)
+  groupPoints     Int      @default(0)
+  thirdPoints     Int      @default(0)
+  r32Points       Int      @default(0)
+  r16Points       Int      @default(0)
+  qfPoints        Int      @default(0)
+  finalPosPoints  Int      @default(0)
+  breakdown       Json?
+  updatedAt       DateTime @updatedAt
+}
+
+model PredictionAudit {
+  id        String   @id @default(cuid())
+  userId    String
+  user      User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  category  String
+  field     String
+  oldValue  String?
+  newValue  String?
+  createdAt DateTime @default(now())
+
+  @@index([userId, createdAt])
+}
+
+model PhaseCompletion {
+  phase           Phase    @id
+  completedAt     DateTime @default(now())
+  rankingUpdatedAt DateTime @default(now())
+}
