@@ -1,7 +1,9 @@
 import { Router, Request, Response, NextFunction } from 'express';
+import { Phase } from '@prisma/client';
 import { prisma } from '../prisma.js';
 import { getAllDeadlines } from '../services/deadline.service.js';
 import { PHASE_LABELS } from '../constants.js';
+import { getLiveMatches } from '../services/footballApi.service.js';
 
 const router = Router();
 
@@ -86,6 +88,16 @@ router.get('/scoring-config', async (_req: Request, res: Response, next: NextFun
   try {
     const config = await prisma.scoringConfig.findMany({ orderBy: { key: 'asc' } });
     res.json(config);
+  } catch (error) {
+    next(error);
+  }
+});
+
+router.get('/matches/live', async (req: Request, res: Response, next: NextFunction) => {
+  try {
+    const phase = req.query.phase as Phase | undefined;
+    const data = await getLiveMatches(phase);
+    res.json(data);
   } catch (error) {
     next(error);
   }

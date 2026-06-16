@@ -1,13 +1,11 @@
 import { useEffect, useState } from 'react';
 import { Layout } from '../components/Layout';
-import { CountdownTimer } from '../components/CountdownTimer';
-import { catalogApi, predictionsApi, Team, Deadline } from '../lib/api';
+import { catalogApi, predictionsApi, Team } from '../lib/api';
 
 const PHASES = [
   { key: 'R32', label: 'Dieciseisavos', slots: 16 },
   { key: 'R16', label: 'Octavos', slots: 8 },
   { key: 'QF', label: 'Cuartos', slots: 4 },
-  { key: 'SF', label: 'Semifinales', slots: 2 },
 ];
 
 export function BracketPage() {
@@ -15,34 +13,38 @@ export function BracketPage() {
   const [activePhase, setActivePhase] = useState('R32');
   const [predictions, setPredictions] = useState<Record<string, string>>({});
   const [finalPred, setFinalPred] = useState({ championId: '', runnerUpId: '', thirdId: '', fourthId: '' });
-  const [deadlines, setDeadlines] = useState<Deadline[]>([]);
-  const [templates, setTemplates] = useState<Array<{ slot: string; description?: string; homeSource: string; awaySource: string }>>([]);
+  const [phaseLocked, setPhaseLocked] = useState(false);
+  const [finalLocked, setFinalLocked] = useState(false);
+  const [templates, setTemplates] = useState<Array<{ slot: string; description?: string }>>([]);
   const [message, setMessage] = useState('');
   const [error, setError] = useState('');
   const [saving, setSaving] = useState(false);
 
-  const phaseDeadline = deadlines.find((d) => d.phase === activePhase);
-  const groupsDeadline = deadlines.find((d) => d.phase === 'GROUPS');
-  const isLocked = phaseDeadline?.isLocked ?? false;
-
   useEffect(() => {
     catalogApi.teams().then(setTeams).catch(console.error);
-    catalogApi.deadlines().then(setDeadlines).catch(console.error);
     predictionsApi.getFinal().then((f) => {
-      const data = f as Record<string, string> | null;
-      if (data) setFinalPred({
-        championId: data.championId ?? '',
-        runnerUpId: data.runnerUpId ?? '',
-        thirdId: data.thirdId ?? '',
-        fourthId: data.fourthId ?? '',
-      });
+      setFinalLocked(f.locked);
+      const data = f.prediction as Record<string, string> | null;
+      if (data) {
+        setFinalPred({
+          championId: data.championId ?? '',
+          runnerUpId: data.runnerUpId ?? '',
+          thirdId: data.thirdId ?? '',
+          fourthId: data.fourthId ?? '',
+        });
+      }
     }).catch(console.error);
   }, []);
 
   useEffect(() => {
-    predictionsApi.getBracket(activePhase).then((preds) => {
+    if (activePhase === 'FINAL_POS') return;
+
+    predictionsApi.getBracket(activePhase).then((data) => {
+      setPhaseLocked(data.locked);
       const map: Record<string, string> = {};
-      (preds as Array<{ slot: string; teamId: string }>).forEach((p) => { map[p.slot] = p.teamId; });
+      (data.predictions as Array<{ slot: string; teamId: string }>).forEach((p) => {
+        map[p.slot] = p.teamId;
+      });
       setPredictions(map);
     }).catch(console.error);
 
@@ -63,6 +65,11 @@ export function BracketPage() {
     : [];
 
   const handleSaveBracket = async () => {
+    const confirmed = window.confirm(
+      `¿Enviar pronóstico de ${phaseConfig?.label}?\n\nSolo puedes hacerlo UNA vez. Después quedará bloqueado.`,
+    );
+    if (!confirmed) return;
+
     setSaving(true);
     setError('');
     setMessage('');
@@ -70,8 +77,9 @@ export function BracketPage() {
       const preds = Object.entries(predictions)
         .filter(([, teamId]) => teamId)
         .map(([slot, teamId]) => ({ slot, teamId }));
-      await predictionsApi.saveBracket(activePhase, preds);
-      setMessage(`Pronósticos de ${phaseConfig?.label} guardados`);
+      const result = await predictionsApi.saveBracket(activePhase, preds) as { message: string };
+      setPhaseLocked(true);
+      setMessage(result.message ?? 'Pronóstico enviado y bloqueado');
     } catch (err) {
       setError(err instanceof Error ? err.message : 'Error al guardar');
     } finally {
@@ -80,12 +88,18 @@ export function BracketPage() {
   };
 
   const handleSaveFinal = async () => {
+    const confirmed = window.confirm(
+      '¿Enviar posiciones finales?\n\nSolo puedes hacerlo UNA vez. Después quedará bloqueado.',
+    );
+    if (!confirmed) return;
+
     setSaving(true);
     setError('');
     setMessage('');
     try {
-      await predictionsApi.saveFinal(finalPred);
-      setMessage('Posiciones finales guardadas');
+      const result = await predictionsApi.saveFinal(finalPred) as { message: string };
+      setFinalLocked(true);
+      setMessage(result.message ?? 'Posiciones finales bloqueadas');
     } catch (err) {
       setError(err instanceof Error ? err.message : 'Error al guardar');
     } finally {
@@ -97,7 +111,13 @@ export function BracketPage() {
     <Layout>
       <div className="flex flex-col md:flex-row md:items-center justify-between mb-6 gap-4">
         <h2 className="text-2xl font-bold text-infinito-navy">Pronóstico de Llave</h2>
-        {phaseDeadline && <CountdownTimer lockAt={phaseDeadline.lockAt} phase={activePhase} isLocked={phaseDeadline.isLocked} />}
+        {activePhase !== 'FINAL_POS' && (
+          phaseLocked ? (
+            <span className="badge-locked">Enviado y bloqueado</span>
+          ) : (
+            <span className="badge-open">Abierto — un solo intento</span>
+          )
+        )}
       </div>
 
       {message && <div className="bg-green-50 text-green-700 p-3 rounded-lg mb-4">{message}</div>}
@@ -141,7 +161,7 @@ export function BracketPage() {
                   className="input text-sm"
                   value={predictions[slot] ?? ''}
                   onChange={(e) => setPredictions((prev) => ({ ...prev, [slot]: e.target.value }))}
-                  disabled={isLocked}
+                  disabled={phaseLocked}
                 >
                   <option value="">Seleccionar equipo...</option>
                   {teams.map((t) => (
@@ -151,9 +171,9 @@ export function BracketPage() {
               </div>
             ))}
           </div>
-          {!isLocked && (
+          {!phaseLocked && (
             <button onClick={handleSaveBracket} className="btn-primary" disabled={saving}>
-              {saving ? 'Guardando...' : `Guardar ${phaseConfig?.label}`}
+              {saving ? 'Enviando...' : `Enviar ${phaseConfig?.label} (1 solo intento)`}
             </button>
           )}
         </>
@@ -162,6 +182,11 @@ export function BracketPage() {
           <div className="mb-4 p-3 bg-infinito-navy/5 rounded-lg text-sm">
             Predice campeón (10 pts), subcampeón (5 pts), tercero (3 pts) y cuarto (3 pts).
           </div>
+          {finalLocked ? (
+            <span className="badge-locked mb-4 inline-block">Posiciones finales enviadas y bloqueadas</span>
+          ) : (
+            <span className="badge-open mb-4 inline-block">Abierto — un solo intento</span>
+          )}
           <div className="grid md:grid-cols-2 gap-4 mb-6">
             {([
               ['championId', 'Campeón', 10],
@@ -175,7 +200,7 @@ export function BracketPage() {
                   className="input text-sm mt-1"
                   value={finalPred[field]}
                   onChange={(e) => setFinalPred((prev) => ({ ...prev, [field]: e.target.value }))}
-                  disabled={groupsDeadline?.isLocked}
+                  disabled={finalLocked}
                 >
                   <option value="">Seleccionar...</option>
                   {teams.map((t) => (
@@ -185,9 +210,9 @@ export function BracketPage() {
               </div>
             ))}
           </div>
-          {!groupsDeadline?.isLocked && (
+          {!finalLocked && (
             <button onClick={handleSaveFinal} className="btn-primary" disabled={saving}>
-              {saving ? 'Guardando...' : 'Guardar posiciones finales'}
+              {saving ? 'Enviando...' : 'Enviar posiciones finales (1 solo intento)'}
             </button>
           )}
         </>

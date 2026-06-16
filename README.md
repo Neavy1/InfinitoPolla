@@ -110,9 +110,22 @@ Configurable desde el panel admin (`ScoringConfig`).
 
 ## Anti-trampa
 
-- `lockAt(fase) = primer kickoff de la fase - 1 minuto`
-- Validación en servidor en cada `PUT` de pronóstico → HTTP 423 si bloqueado
-- `PredictionAudit` registra todos los cambios
+- Cada pronóstico (grupos, llave por fase, posiciones finales) se **envía una sola vez** y queda bloqueado permanentemente.
+- `PredictionLock` registra cuándo cada usuario envió su pronóstico.
+- `PredictionAudit` registra todos los cambios.
+
+## Resultados en vivo (API-Football)
+
+Al consultar `/api/catalog/matches/live`, el sistema consulta [API-Football](https://www.api-football.com/) (si `API_FOOTBALL_KEY` está configurada), sincroniza marcadores y los muestra en la página de grupos.
+
+Variables en `.env`:
+```
+API_FOOTBALL_KEY=tu_key
+API_FOOTBALL_LEAGUE_ID=1
+API_FOOTBALL_SEASON=2026
+```
+
+Sin API key, se muestran los resultados cargados en la base de datos (admin o seed).
 
 ## Formato FIFA 2026
 

@@ -28,6 +28,14 @@ enum MatchStatus {
   FINISHED
 }
 
+enum PredictionCategory {
+  GROUPS
+  R32
+  R16
+  QF
+  FINAL_POSITIONS
+}
+
 model User {
   id           String   @id @default(cuid())
   username     String   @unique
@@ -43,6 +51,17 @@ model User {
   finalPrediction    FinalPrediction?
   score              Score?
   audits             PredictionAudit[]
+  predictionLocks    PredictionLock[]
+}
+
+model PredictionLock {
+  id        String             @id @default(cuid())
+  userId    String
+  user      User               @relation(fields: [userId], references: [id], onDelete: Cascade)
+  category  PredictionCategory
+  lockedAt  DateTime           @default(now())
+
+  @@unique([userId, category])
 }
 
 model Group {

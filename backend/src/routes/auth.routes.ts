@@ -3,14 +3,15 @@ import { z } from 'zod';
 import { authenticate, verifyRefreshToken, signAccessToken } from '../middleware/auth.js';
 import { validateBody } from '../middleware/validate.js';
 import * as authService from '../services/auth.service.js';
+import { usernameSchema, optionalEmailSchema } from '../validators/auth.validators.js';
 
 const router = Router();
 
 const registerSchema = z.object({
-  username: z.string().min(3).max(30).regex(/^[a-zA-Z0-9_]+$/),
-  password: z.string().min(6).max(100),
-  email: z.string().email().optional(),
-  turnstileToken: z.string(),
+  username: usernameSchema,
+  password: z.string().min(6, 'La contraseña debe tener al menos 6 caracteres').max(100),
+  email: optionalEmailSchema,
+  turnstileToken: z.string().min(1, 'Completa la verificación de seguridad'),
 });
 
 const loginSchema = z.object({

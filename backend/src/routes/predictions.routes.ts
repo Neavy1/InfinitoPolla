@@ -1,27 +1,28 @@
 import { Router, Request, Response, NextFunction } from 'express';
-import { Phase } from '@prisma/client';
+import { Phase, PredictionCategory } from '@prisma/client';
 import { z } from 'zod';
 import { prisma } from '../prisma.js';
 import { authenticate } from '../middleware/auth.js';
 import { validateBody } from '../middleware/validate.js';
-import { deadlineGuard } from '../middleware/deadlineGuard.js';
 import { logAuditBatch } from '../services/audit.service.js';
-import { getAllDeadlines } from '../services/deadline.service.js';
+import {
+  assertNotLocked,
+  getUserLocks,
+  lockSubmission,
+  phaseToCategory,
+} from '../services/submissionLock.service.js';
 
 const router = Router();
 
-const groupPredictionSchema = z.object({
-  predictions: z.array(
+const groupsSubmitSchema = z.object({
+  groups: z.array(
     z.object({
       groupId: z.string(),
       firstTeamId: z.string(),
       secondTeamId: z.string(),
     }),
   ),
-});
-
-const thirdPredictionSchema = z.object({
-  predictions: z.array(
+  thirds: z.array(
     z.object({
       groupId: z.string(),
       teamId: z.string(),
@@ -46,94 +47,45 @@ const finalPredictionSchema = z.object({
   fourthId: z.string(),
 });
 
-router.get('/groups', authenticate, async (req: Request, res: Response, next: NextFunction) => {
-  try {
-    const predictions = await prisma.groupPrediction.findMany({
-      where: { userId: req.user!.userId },
-      include: { group: true, firstTeam: true, secondTeam: true },
+function handleRouteError(error: unknown, res: Response, next: NextFunction): void {
+  if (error && typeof error === 'object' && 'statusCode' in error && (error as { statusCode: number }).statusCode === 423) {
+    res.status(423).json({
+      error: 'Pronóstico bloqueado',
+      message: error instanceof Error ? error.message : 'Ya enviaste este pronóstico',
     });
-    res.json(predictions);
+    return;
+  }
+  next(error);
+}
+
+router.get('/locks', authenticate, async (req: Request, res: Response, next: NextFunction) => {
+  try {
+    const locks = await getUserLocks(req.user!.userId);
+    res.json(locks);
   } catch (error) {
     next(error);
   }
 });
 
-router.put(
-  '/groups',
-  authenticate,
-  deadlineGuard(Phase.GROUPS),
-  validateBody(groupPredictionSchema),
-  async (req: Request, res: Response, next: NextFunction) => {
-    try {
-      const userId = req.user!.userId;
-      const { predictions } = req.body;
-      const audits: Parameters<typeof logAuditBatch>[0] = [];
-
-      for (const pred of predictions) {
-        if (pred.firstTeamId === pred.secondTeamId) {
-          res.status(400).json({ error: 'El 1ro y 2do del grupo deben ser equipos distintos' });
-          return;
-        }
-
-        const existing = await prisma.groupPrediction.findUnique({
-          where: { userId_groupId: { userId, groupId: pred.groupId } },
-        });
-
-        await prisma.groupPrediction.upsert({
-          where: { userId_groupId: { userId, groupId: pred.groupId } },
-          create: {
-            userId,
-            groupId: pred.groupId,
-            firstTeamId: pred.firstTeamId,
-            secondTeamId: pred.secondTeamId,
-          },
-          update: {
-            firstTeamId: pred.firstTeamId,
-            secondTeamId: pred.secondTeamId,
-          },
-        });
-
-        if (existing) {
-          if (existing.firstTeamId !== pred.firstTeamId) {
-            audits.push({
-              userId,
-              category: 'groups',
-              field: `${pred.groupId}.first`,
-              oldValue: existing.firstTeamId,
-              newValue: pred.firstTeamId,
-            });
-          }
-          if (existing.secondTeamId !== pred.secondTeamId) {
-            audits.push({
-              userId,
-              category: 'groups',
-              field: `${pred.groupId}.second`,
-              oldValue: existing.secondTeamId,
-              newValue: pred.secondTeamId,
-            });
-          }
-        } else {
-          audits.push({
-            userId,
-            category: 'groups',
-            field: `${pred.groupId}`,
-            oldValue: null,
-            newValue: `${pred.firstTeamId},${pred.secondTeamId}`,
-          });
-        }
-      }
-
-      await logAuditBatch(audits);
-      const result = await prisma.groupPrediction.findMany({
+router.get('/groups', authenticate, async (req: Request, res: Response, next: NextFunction) => {
+  try {
+    const userId = req.user!.userId;
+    const [predictions, locks] = await Promise.all([
+      prisma.groupPrediction.findMany({
         where: { userId },
         include: { group: true, firstTeam: true, secondTeam: true },
-      });
-      res.json(result);
-    } catch (error) {
-      next(error);
-    }
-  },
-);
+      }),
+      getUserLocks(userId),
+    ]);
+    res.json({
+      predictions,
+      locked: locks.some((l) => l.category === PredictionCategory.GROUPS),
+      locks,
+    });
+  } catch (error) {
+    next(error);
+  }
+});
 
 router.get('/thirds', authenticate, async (req: Request, res: Response, next: NextFunction) => {
   try {
@@ -148,52 +100,108 @@ router.get('/thirds', authenticate, async (req: Request, res: Response, next: Ne
 });
 
 router.put(
-  '/thirds',
+  '/submit/groups',
   authenticate,
-  deadlineGuard(Phase.GROUPS),
-  validateBody(thirdPredictionSchema),
+  validateBody(groupsSubmitSchema),
   async (req: Request, res: Response, next: NextFunction) => {
     try {
       const userId = req.user!.userId;
-      const { predictions } = req.body;
+      await assertNotLocked(userId, PredictionCategory.GROUPS);
 
-      const groupIds = predictions.map((p: { groupId: string }) => p.groupId);
-      if (new Set(groupIds).size !== 8) {
+      const { groups, thirds } = req.body;
+      const allGroups = await prisma.group.count();
+
+      if (groups.length < allGroups) {
+        res.status(400).json({
+          error: `Debes pronosticar los ${allGroups} grupos (1ro y 2do en cada uno)`,
+        });
+        return;
+      }
+
+      const thirdGroupIds = thirds.map((t: { groupId: string }) => t.groupId);
+      if (new Set(thirdGroupIds).size !== 8) {
         res.status(400).json({ error: 'Los 8 terceros deben ser de grupos distintos' });
         return;
       }
 
-      const existing = await prisma.thirdPrediction.findMany({ where: { userId } });
-      const audits = predictions.map((p: { groupId: string; teamId: string }) => {
-        const old = existing.find((e) => e.groupId === p.groupId);
-        return {
-          userId,
-          category: 'thirds',
-          field: p.groupId,
-          oldValue: old?.teamId ?? null,
-          newValue: p.teamId,
-        };
-      });
+      const audits: Parameters<typeof logAuditBatch>[0] = [];
 
-      await prisma.$transaction([
-        prisma.thirdPrediction.deleteMany({ where: { userId } }),
-        prisma.thirdPrediction.createMany({
-          data: predictions.map((p: { groupId: string; teamId: string }) => ({
+      await prisma.$transaction(async (tx) => {
+        for (const pred of groups) {
+          if (pred.firstTeamId === pred.secondTeamId) {
+            throw new Error('El 1ro y 2do del grupo deben ser equipos distintos');
+          }
+          await tx.groupPrediction.upsert({
+            where: { userId_groupId: { userId, groupId: pred.groupId } },
+            create: {
+              userId,
+              groupId: pred.groupId,
+              firstTeamId: pred.firstTeamId,
+              secondTeamId: pred.secondTeamId,
+            },
+            update: {
+              firstTeamId: pred.firstTeamId,
+              secondTeamId: pred.secondTeamId,
+            },
+          });
+          audits.push({
+            userId,
+            category: 'groups.submit',
+            field: pred.groupId,
+            oldValue: null,
+            newValue: `${pred.firstTeamId},${pred.secondTeamId}`,
+          });
+        }
+
+        await tx.thirdPrediction.deleteMany({ where: { userId } });
+        await tx.thirdPrediction.createMany({
+          data: thirds.map((p: { groupId: string; teamId: string }) => ({
             userId,
             groupId: p.groupId,
             teamId: p.teamId,
           })),
+        });
+
+        for (const p of thirds) {
+          audits.push({
+            userId,
+            category: 'thirds.submit',
+            field: p.groupId,
+            oldValue: null,
+            newValue: p.teamId,
+          });
+        }
+
+        await tx.predictionLock.create({
+          data: { userId, category: PredictionCategory.GROUPS },
+        });
+      });
+
+      await logAuditBatch(audits);
+
+      const [groupPreds, thirdPreds] = await Promise.all([
+        prisma.groupPrediction.findMany({
+          where: { userId },
+          include: { group: true, firstTeam: true, secondTeam: true },
+        }),
+        prisma.thirdPrediction.findMany({
+          where: { userId },
+          include: { group: true, team: true },
         }),
       ]);
 
-      await logAuditBatch(audits);
-      const result = await prisma.thirdPrediction.findMany({
-        where: { userId },
-        include: { group: true, team: true },
+      res.json({
+        message: 'Pronóstico de grupos enviado y bloqueado. No podrás modificarlo.',
+        locked: true,
+        groups: groupPreds,
+        thirds: thirdPreds,
       });
-      res.json(result);
     } catch (error) {
-      next(error);
+      if (error instanceof Error && error.message.includes('equipos distintos')) {
+        res.status(400).json({ error: error.message });
+        return;
+      }
+      handleRouteError(error, res, next);
     }
   },
 );
@@ -201,78 +209,94 @@ router.put(
 router.get('/bracket/:phase', authenticate, async (req: Request, res: Response, next: NextFunction) => {
   try {
     const phase = req.params.phase as Phase;
-    const predictions = await prisma.bracketPrediction.findMany({
-      where: { userId: req.user!.userId, phase },
-      include: { team: true },
-      orderBy: { slot: 'asc' },
+    const category = phaseToCategory(phase);
+    const userId = req.user!.userId;
+    const [predictions, locks] = await Promise.all([
+      prisma.bracketPrediction.findMany({
+        where: { userId, phase },
+        include: { team: true },
+        orderBy: { slot: 'asc' },
+      }),
+      getUserLocks(userId),
+    ]);
+    res.json({
+      predictions,
+      locked: category ? locks.some((l) => l.category === category) : false,
     });
-    res.json(predictions);
   } catch (error) {
     next(error);
   }
 });
 
-router.put(
-  '/bracket',
-  authenticate,
-  async (req: Request, res: Response, next: NextFunction) => {
-    try {
-      const parsed = bracketPredictionSchema.safeParse(req.body);
-      if (!parsed.success) {
-        res.status(400).json({ error: 'Datos inválidos', details: parsed.error.flatten() });
-        return;
-      }
-
-      const { phase, predictions } = parsed.data;
-      const locked = await import('../services/deadline.service.js').then((m) => m.isPhaseLocked(phase));
-      if (locked) {
-        res.status(423).json({ error: 'Fase bloqueada', phase });
-        return;
-      }
-
-      const userId = req.user!.userId;
-      const existing = await prisma.bracketPrediction.findMany({ where: { userId, phase } });
-      const audits = predictions.map((p) => {
-        const old = existing.find((e) => e.slot === p.slot);
-        return {
-          userId,
-          category: `bracket.${phase}`,
-          field: p.slot,
-          oldValue: old?.teamId ?? null,
-          newValue: p.teamId,
-        };
-      });
-
-      await prisma.$transaction(
-        predictions.map((p) =>
-          prisma.bracketPrediction.upsert({
-            where: { userId_phase_slot: { userId, phase, slot: p.slot } },
-            create: { userId, phase, slot: p.slot, teamId: p.teamId },
-            update: { teamId: p.teamId },
-          }),
-        ),
-      );
-
-      await logAuditBatch(audits);
-      const result = await prisma.bracketPrediction.findMany({
-        where: { userId, phase },
-        include: { team: true },
-        orderBy: { slot: 'asc' },
-      });
-      res.json(result);
-    } catch (error) {
-      next(error);
+router.put('/bracket', authenticate, async (req: Request, res: Response, next: NextFunction) => {
+  try {
+    const parsed = bracketPredictionSchema.safeParse(req.body);
+    if (!parsed.success) {
+      res.status(400).json({ error: 'Datos inválidos', details: parsed.error.flatten() });
+      return;
     }
-  },
-);
+
+    const { phase, predictions } = parsed.data;
+    const category = phaseToCategory(phase);
+    if (!category) {
+      res.status(400).json({ error: 'Fase no válida para pronóstico' });
+      return;
+    }
+
+    const userId = req.user!.userId;
+    await assertNotLocked(userId, category);
+
+    await prisma.$transaction(
+      predictions.map((p) =>
+        prisma.bracketPrediction.upsert({
+          where: { userId_phase_slot: { userId, phase, slot: p.slot } },
+          create: { userId, phase, slot: p.slot, teamId: p.teamId },
+          update: { teamId: p.teamId },
+        }),
+      ),
+    );
+
+    await lockSubmission(userId, category);
+    await logAuditBatch(
+      predictions.map((p) => ({
+        userId,
+        category: `bracket.${phase}.submit`,
+        field: p.slot,
+        oldValue: null,
+        newValue: p.teamId,
+      })),
+    );
+
+    const result = await prisma.bracketPrediction.findMany({
+      where: { userId, phase },
+      include: { team: true },
+      orderBy: { slot: 'asc' },
+    });
+
+    res.json({
+      message: 'Pronóstico enviado y bloqueado. No podrás modificarlo.',
+      locked: true,
+      predictions: result,
+    });
+  } catch (error) {
+    handleRouteError(error, res, next);
+  }
+});
 
 router.get('/final', authenticate, async (req: Request, res: Response, next: NextFunction) => {
   try {
-    const prediction = await prisma.finalPrediction.findUnique({
-      where: { userId: req.user!.userId },
-      include: { champion: true, runnerUp: true, third: true, fourth: true },
+    const userId = req.user!.userId;
+    const [prediction, locks] = await Promise.all([
+      prisma.finalPrediction.findUnique({
+        where: { userId },
+        include: { champion: true, runnerUp: true, third: true, fourth: true },
+      }),
+      getUserLocks(userId),
+    ]);
+    res.json({
+      prediction,
+      locked: locks.some((l) => l.category === PredictionCategory.FINAL_POSITIONS),
     });
-    res.json(prediction);
   } catch (error) {
     next(error);
   }
@@ -281,11 +305,12 @@ router.get('/final', authenticate, async (req: Request, res: Response, next: Nex
 router.put(
   '/final',
   authenticate,
-  deadlineGuard(Phase.GROUPS),
   validateBody(finalPredictionSchema),
   async (req: Request, res: Response, next: NextFunction) => {
     try {
       const userId = req.user!.userId;
+      await assertNotLocked(userId, PredictionCategory.FINAL_POSITIONS);
+
       const { championId, runnerUpId, thirdId, fourthId } = req.body;
       const ids = [championId, runnerUpId, thirdId, fourthId];
       if (new Set(ids).size !== 4) {
@@ -293,20 +318,19 @@ router.put(
         return;
       }
 
-      const existing = await prisma.finalPrediction.findUnique({ where: { userId } });
-
       await prisma.finalPrediction.upsert({
         where: { userId },
         create: { userId, championId, runnerUpId, thirdId, fourthId },
         update: { championId, runnerUpId, thirdId, fourthId },
       });
 
+      await lockSubmission(userId, PredictionCategory.FINAL_POSITIONS);
       await logAuditBatch([
         {
           userId,
-          category: 'final',
+          category: 'final.submit',
           field: 'positions',
-          oldValue: existing ? JSON.stringify(existing) : null,
+          oldValue: null,
           newValue: JSON.stringify({ championId, runnerUpId, thirdId, fourthId }),
         },
       ]);
@@ -315,20 +339,16 @@ router.put(
         where: { userId },
         include: { champion: true, runnerUp: true, third: true, fourth: true },
       });
-      res.json(result);
+
+      res.json({
+        message: 'Posiciones finales enviadas y bloqueadas.',
+        locked: true,
+        prediction: result,
+      });
     } catch (error) {
-      next(error);
+      handleRouteError(error, res, next);
     }
   },
 );
-
-router.get('/deadlines', authenticate, async (_req: Request, res: Response, next: NextFunction) => {
-  try {
-    const deadlines = await getAllDeadlines();
-    res.json(deadlines);
-  } catch (error) {
-    next(error);
-  }
-});
 
 export default router;

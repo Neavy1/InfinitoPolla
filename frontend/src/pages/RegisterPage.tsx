@@ -17,6 +17,11 @@ export function RegisterPage() {
 
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
+    const trimmedUsername = username.trim();
+    if (!/^[\p{L}\p{N}_.-]{3,30}$/u.test(trimmedUsername)) {
+      setError('Usuario: 3-30 caracteres, solo letras, números, puntos, guiones o _ (sin espacios)');
+      return;
+    }
     if (password !== confirm) {
       setError('Las contraseñas no coinciden');
       return;
@@ -28,7 +33,7 @@ export function RegisterPage() {
     setLoading(true);
     setError('');
     try {
-      await register(username, password, turnstileToken, email || undefined);
+      await register(trimmedUsername, password, turnstileToken, email.trim() || undefined);
       navigate('/dashboard');
     } catch (err) {
       setError(err instanceof Error ? err.message : 'Error al registrar');
@@ -45,7 +50,19 @@ export function RegisterPage() {
         <form onSubmit={handleSubmit} className="space-y-4">
           <div>
             <label className="block text-sm font-medium mb-1">Usuario</label>
-            <input className="input" value={username} onChange={(e) => setUsername(e.target.value)} required minLength={3} />
+            <input
+              className="input"
+              value={username}
+              onChange={(e) => setUsername(e.target.value)}
+              required
+              minLength={3}
+              maxLength={30}
+              autoComplete="username"
+              placeholder="ej: juan_perez o María92"
+            />
+            <p className="text-xs text-gray-500 mt-1">
+              3-30 caracteres. Letras (con tildes), números, punto, guion o _. Sin espacios.
+            </p>
           </div>
           <div>
             <label className="block text-sm font-medium mb-1">Email (opcional)</label>

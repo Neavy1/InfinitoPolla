@@ -146,19 +146,40 @@ export const catalogApi = {
     api<Array<{ phase: string; slot: string; homeSource: string; awaySource: string; description?: string }>>(
       `/catalog/bracket-template${phase ? `?phase=${phase}` : ''}`,
     ),
+  liveMatches: (phase?: string) =>
+    api<{
+      matches: Array<{
+        id: string;
+        phase: string;
+        groupName: string | null;
+        status: string;
+        homeTeam: { name: string; code: string } | null;
+        awayTeam: { name: string; code: string } | null;
+        homeScore: number | null;
+        awayScore: number | null;
+      }>;
+      synced: number;
+      source: string;
+      apiConfigured: boolean;
+    }>(`/catalog/matches/live${phase ? `?phase=${phase}` : ''}`),
 };
 
 export const predictionsApi = {
-  getGroups: () => api<unknown[]>('/predictions/groups'),
-  saveGroups: (predictions: Array<{ groupId: string; firstTeamId: string; secondTeamId: string }>) =>
-    api('/predictions/groups', { method: 'PUT', body: JSON.stringify({ predictions }) }),
+  getLocks: () => api<Array<{ category: string; lockedAt: string; label: string }>>('/predictions/locks'),
+  getGroups: () => api<{
+    predictions: unknown[];
+    locked: boolean;
+    locks: Array<{ category: string; lockedAt: string; label: string }>;
+  }>('/predictions/groups'),
+  submitGroups: (data: {
+    groups: Array<{ groupId: string; firstTeamId: string; secondTeamId: string }>;
+    thirds: Array<{ groupId: string; teamId: string }>;
+  }) => api('/predictions/submit/groups', { method: 'PUT', body: JSON.stringify(data) }),
   getThirds: () => api<unknown[]>('/predictions/thirds'),
-  saveThirds: (predictions: Array<{ groupId: string; teamId: string }>) =>
-    api('/predictions/thirds', { method: 'PUT', body: JSON.stringify({ predictions }) }),
-  getBracket: (phase: string) => api<unknown[]>(`/predictions/bracket/${phase}`),
+  getBracket: (phase: string) => api<{ predictions: unknown[]; locked: boolean }>(`/predictions/bracket/${phase}`),
   saveBracket: (phase: string, predictions: Array<{ slot: string; teamId: string }>) =>
     api('/predictions/bracket', { method: 'PUT', body: JSON.stringify({ phase, predictions }) }),
-  getFinal: () => api<unknown>('/predictions/final'),
+  getFinal: () => api<{ prediction: unknown; locked: boolean }>('/predictions/final'),
   saveFinal: (data: { championId: string; runnerUpId: string; thirdId: string; fourthId: string }) =>
     api('/predictions/final', { method: 'PUT', body: JSON.stringify(data) }),
 };

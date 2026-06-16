@@ -25,4 +25,8 @@ export const config = {
   adminPassword: process.env.ADMIN_PASSWORD ?? 'admin123',
   lockBufferMinutes: 1,
   isDev: (process.env.NODE_ENV ?? 'development') === 'development',
+  footballApiKey: process.env.API_FOOTBALL_KEY ?? '',
+  footballApiUrl: process.env.API_FOOTBALL_URL ?? 'https://v3.football.api-sports.io',
+  footballLeagueId: parseInt(process.env.API_FOOTBALL_LEAGUE_ID ?? '1', 10),
+  footballSeason: parseInt(process.env.API_FOOTBALL_SEASON ?? '2026', 10),
 };
